@@ -86,8 +86,9 @@ char handle_event_type_1(Event *event) {
 	if (zero_delay_pct > 0 && random(cr_state, 100) < zero_delay_pct) {
 		new_event.timestamp = event->timestamp + 1;
 	} else {
-		new_event.timestamp = event->timestamp + lookahead +
-			random_exp(cr_state, mean);
+		int advance = lookahead + random_exp(cr_state, mean);
+		if (advance < 1) advance = 1;
+		new_event.timestamp = event->timestamp + advance;
 	}
 
 	char res = append_event_to_queue(&new_event);
