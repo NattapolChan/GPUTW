@@ -17,6 +17,11 @@ __device__ uint		g_n_nodes;
 __device__ uint		g_n_lps;
 __device__ uint		g_nodes_per_lp;
 
+/* Stats counters (defined in kernels.cu) */
+extern __device__ uint  g_n_total_processed;
+extern __device__ uint  g_n_total_rolledback;
+extern __device__ char  g_track_stats;
+
 static	uint	nodes_per_lp;
 static	uint	n_nodes;
 static	uint	n_lps;
@@ -59,6 +64,8 @@ struct BenchParams {
 	int    n_runs;             // number of test runs
 	int    warmup_ms;          // warmup time in ms
 	int    measure_ms;         // measurement window in ms
+	int    count_rollbacks;    // enable rollback/processed counting
+	int    minimal;            // minimal mode: no sampling, no stats, just final MEv/s
 };
 
 static void print_usage(const char *prog) {
@@ -79,6 +86,8 @@ static void print_usage(const char *prog) {
 	printf("  --runs N            Number of test runs (default: 3)\n");
 	printf("  --warmup N          Warmup time in ms (default: 200)\n");
 	printf("  --measure N         Measurement window in ms (default: 300)\n");
+	printf("  --count-rollbacks   Enable processed/rollback counters (has overhead)\n");
+	printf("  --minimal           Minimal mode: no sampling, no stats, just final MEv/s\n");
 	printf("  --help              Show this help\n");
 }
 
@@ -98,6 +107,8 @@ static BenchParams parse_args(int argc, char *argv[]) {
 	p.n_runs             = 3;
 	p.warmup_ms          = 200;
 	p.measure_ms         = 300;
+	p.count_rollbacks    = 0;
+	p.minimal            = 0;
 
 	int mean_set = 0;
 
@@ -141,6 +152,10 @@ static BenchParams parse_args(int argc, char *argv[]) {
 			p.warmup_ms = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--measure") == 0 && i+1 < argc) {
 			p.measure_ms = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--count-rollbacks") == 0) {
+			p.count_rollbacks = 1;
+		} else if (strcmp(argv[i], "--minimal") == 0) {
+			p.minimal = 1;
 		} else {
 			printf("Unknown option: %s\n", argv[i]);
 			print_usage(argv[0]);
@@ -188,6 +203,7 @@ int main(int argc, char *argv[]) {
 	printf("runs:            %d\n", bp.n_runs);
 	printf("warmup:          %d ms\n", bp.warmup_ms);
 	printf("measure:         %d ms\n", bp.measure_ms);
+	printf("count_rollbacks: %s\n", bp.count_rollbacks ? "yes" : "no");
 	printf("=============================\n\n");
 
 	/* Setup fixed parameters */
@@ -239,6 +255,15 @@ int main(int argc, char *argv[]) {
 		char	h_rollback_performed;
 
 		cudaDeviceReset();
+
+		/* Enable/disable stats counters */
+		{
+			char flag = bp.count_rollbacks ? 1 : 0;
+			uint zero = 0;
+			cudaMemcpyToSymbol(g_track_stats, &flag, sizeof(char));
+			cudaMemcpyToSymbol(g_n_total_processed, &zero, sizeof(uint));
+			cudaMemcpyToSymbol(g_n_total_rolledback, &zero, sizeof(uint));
+		}
 
 		if (
 		cudaMalloc(&d_model_params, sizeof(int) * n_params) != cudaSuccess ||
@@ -294,27 +319,22 @@ int main(int argc, char *argv[]) {
 		kernel_sort_event_queues<<<n_blocks, threads_per_block>>>();
 
 		/* Timing */
-		cudaEvent_t start, stop, mstart, mstop;
+		cudaEvent_t start, stop;
 		cudaEventCreate(&start);
 		cudaEventCreate(&stop);
-		cudaEventCreate(&mstart);
-		cudaEventCreate(&mstop);
 		float time_ms;
 
 		float total_events = 0;
-		float measure_events = 0;
-		char  measuring = 0;
-		int   n_measurements = 0;
-		float sum_rates = 0;
+		float final_rate;
 
 		cudaDeviceSynchronize();
 		cudaEventRecord(start);
-		cudaEventRecord(mstart);
 
+	if (bp.minimal) {
+		/* ---- MINIMAL MODE: no sampling, no sync, just run ---- */
 		while (1) {
 			int gvt = get_gvt(d_ts_temp);
 
-			/* Clean committed events */
 			h_n_events_cmt = 0;
 			cudaMemcpy(d_n_events_cmt, &h_n_events_cmt, sizeof(uint),
 				cudaMemcpyHostToDevice);
@@ -330,38 +350,6 @@ int main(int argc, char *argv[]) {
 				break;
 			}
 
-			/* Measurement windows */
-			cudaEventRecord(mstop);
-			cudaEventSynchronize(mstop);
-			cudaEventElapsedTime(&time_ms, mstart, mstop);
-
-			if (!measuring && time_ms > bp.warmup_ms) {
-				/* Warmup done, start measuring */
-				measuring = 1;
-				measure_events = 0;
-				cudaEventRecord(mstart);
-			} else if (measuring && time_ms > bp.measure_ms) {
-				float rate = measure_events / time_ms / 1000.0f; // MEv/s
-				sum_rates += rate;
-				n_measurements++;
-
-				float active_percent = (1.0f - inactive_lps_percent);
-
-				printf("  [run %d, sample %d] MEv/s: %8.3f | active: %3.0f%% | GVT: %d\n",
-					r, n_measurements, rate,
-					active_percent * 100.0f, gvt);
-
-				/* Reset for next measurement window */
-				measuring = 0;
-				measure_events = 0;
-				cudaEventRecord(mstart);
-			}
-
-			if (measuring) {
-				measure_events += h_n_events_cmt;
-			}
-
-			/* Handle next events — fixed parameters, no Nelder-Mead */
 			while (1) {
 				h_inac_1 = h_inac_2 = h_inac_3 = 0;
 				h_inac_4 = h_inac_5 = h_inac_6 = 0;
@@ -416,7 +404,6 @@ int main(int argc, char *argv[]) {
 			}
 
 #if (OPTM_SYNC == 1)
-			/* Roll back */
 			while (1) {
 				h_rollback_performed = 0;
 				cudaMemcpy(d_rollback_performed, &h_rollback_performed,
@@ -437,22 +424,197 @@ int main(int argc, char *argv[]) {
 				return 1;
 			}
 
-			/* Sort */
 			kernel_sort_event_queues<<<n_blocks, threads_per_block>>>();
 		}
 
-		/* Total time */
+		cudaEventRecord(stop);
+		cudaEventSynchronize(stop);
+		cudaEventElapsedTime(&time_ms, start, stop);
+
+		final_rate = total_events / time_ms / 1000.0f;
+		printf("  Run %d: %.3f MEv/s (%.0f events, %.0f ms)\n",
+			r, final_rate, total_events, time_ms);
+
+	} else {
+		/* ---- FULL MODE: sampling, %activity, optional rollback stats ---- */
+		cudaEvent_t mstart, mstop;
+		cudaEventCreate(&mstart);
+		cudaEventCreate(&mstop);
+
+		float measure_events = 0;
+		char  measuring = 0;
+		int   n_measurements = 0;
+		float sum_rates = 0;
+		uint64_t total_execute_cycles = 0;
+
+		cudaEventRecord(mstart);
+
+		while (1) {
+			int gvt = get_gvt(d_ts_temp);
+
+			h_n_events_cmt = 0;
+			cudaMemcpy(d_n_events_cmt, &h_n_events_cmt, sizeof(uint),
+				cudaMemcpyHostToDevice);
+
+			kernel_clean_queues<<<n_blocks, threads_per_block>>>(
+				gvt, d_n_events_cmt);
+
+			cudaMemcpy(&h_n_events_cmt, d_n_events_cmt, sizeof(uint),
+				cudaMemcpyDeviceToHost);
+			total_events += h_n_events_cmt;
+
+			if (total_events > committed_events_threshold) {
+				break;
+			}
+
+			/* Measurement windows */
+			cudaEventRecord(mstop);
+			cudaEventSynchronize(mstop);
+			cudaEventElapsedTime(&time_ms, mstart, mstop);
+
+			if (!measuring && time_ms > bp.warmup_ms) {
+				measuring = 1;
+				measure_events = 0;
+				cudaEventRecord(mstart);
+			} else if (measuring && time_ms > bp.measure_ms) {
+				float rate = measure_events / time_ms / 1000.0f;
+				sum_rates += rate;
+				n_measurements++;
+
+				printf("  [run %d, sample %d] MEv/s: %8.3f | GVT: %d\n",
+					r, n_measurements, rate, gvt);
+
+				measuring = 0;
+				measure_events = 0;
+				cudaEventRecord(mstart);
+			}
+
+			if (measuring) {
+				measure_events += h_n_events_cmt;
+			}
+
+			/* Handle next events */
+			while (1) {
+				h_inac_1 = h_inac_2 = h_inac_3 = 0;
+				h_inac_4 = h_inac_5 = h_inac_6 = 0;
+				cudaMemcpy(d_inac_1, &h_inac_1, sizeof(uint),
+					cudaMemcpyHostToDevice);
+				cudaMemcpy(d_inac_2, &h_inac_2, sizeof(uint),
+					cudaMemcpyHostToDevice);
+				cudaMemcpy(d_inac_3, &h_inac_3, sizeof(uint),
+					cudaMemcpyHostToDevice);
+				cudaMemcpy(d_inac_4, &h_inac_4, sizeof(uint),
+					cudaMemcpyHostToDevice);
+				cudaMemcpy(d_inac_5, &h_inac_5, sizeof(uint),
+					cudaMemcpyHostToDevice);
+				cudaMemcpy(d_inac_6, &h_inac_6, sizeof(uint),
+					cudaMemcpyHostToDevice);
+
+				total_execute_cycles++;
+
+#if (OPTM_SYNC == 1)
+				kernel_handle_next_event<<<
+					n_blocks, threads_per_block>>>(
+						gvt, window_size,
+						d_inac_1, d_inac_2, d_inac_3,
+						d_inac_4, d_inac_5, d_inac_6);
+#else
+				kernel_handle_next_event<<<
+					n_blocks, threads_per_block>>>(
+						gvt, h_lookahead,
+						d_inac_1, d_inac_2, d_inac_3,
+						d_inac_4, d_inac_5, d_inac_6);
+#endif
+
+				cudaMemcpy(&h_inac_1, d_inac_1, sizeof(uint),
+					cudaMemcpyDeviceToHost);
+				cudaMemcpy(&h_inac_2, d_inac_2, sizeof(uint),
+					cudaMemcpyDeviceToHost);
+				cudaMemcpy(&h_inac_3, d_inac_3, sizeof(uint),
+					cudaMemcpyDeviceToHost);
+				cudaMemcpy(&h_inac_4, d_inac_4, sizeof(uint),
+					cudaMemcpyDeviceToHost);
+				cudaMemcpy(&h_inac_5, d_inac_5, sizeof(uint),
+					cudaMemcpyDeviceToHost);
+				cudaMemcpy(&h_inac_6, d_inac_6, sizeof(uint),
+					cudaMemcpyDeviceToHost);
+
+#if (ALLOW_ME == 1)
+				uint inac =
+					h_inac_1 + h_inac_2 + h_inac_3 +
+					h_inac_4 + h_inac_5 + h_inac_6;
+				if (inac >= n_lps * inactive_lps_percent) { break; }
+#else
+				break;
+#endif
+			}
+
+#if (OPTM_SYNC == 1)
+			while (1) {
+				h_rollback_performed = 0;
+				cudaMemcpy(d_rollback_performed, &h_rollback_performed,
+					sizeof(char), cudaMemcpyHostToDevice);
+
+				kernel_roll_back<<<n_blocks, threads_per_block>>>(
+					d_rollback_performed);
+
+				cudaMemcpy(&h_rollback_performed, d_rollback_performed,
+					sizeof(char), cudaMemcpyDeviceToHost);
+				if (h_rollback_performed == 0) { break; }
+			}
+#endif
+
+			cudaError_t err = cudaGetLastError();
+			if (err != cudaSuccess) {
+				printf("FATAL ERROR: %s\n", cudaGetErrorString(err));
+				return 1;
+			}
+
+			kernel_sort_event_queues<<<n_blocks, threads_per_block>>>();
+		}
+
 		cudaEventRecord(stop);
 		cudaEventSynchronize(stop);
 		cudaEventElapsedTime(&time_ms, start, stop);
 
 		float avg_rate = total_events / time_ms / 1000.0f;
 		float sampled_avg = n_measurements > 0 ? sum_rates / n_measurements : avg_rate;
+		final_rate = sampled_avg;
 
-		printf("  Run %d: overall=%.3f MEv/s, sampled_avg=%.3f MEv/s, total=%.0f events, time=%.0f ms\n",
+		float activity_pct = total_execute_cycles > 0
+			? 100.0f * total_events / ((float)total_execute_cycles * n_lps)
+			: 0;
+
+		printf("  Run %d: overall=%.3f MEv/s, sampled_avg=%.3f MEv/s, total=%.0f committed, time=%.0f ms\n",
 			r, avg_rate, sampled_avg, total_events, time_ms);
+		printf("  %%activity=%.2f%% (committed / (execute_cycles=%lu x n_lps=%u))\n",
+			activity_pct, (unsigned long)total_execute_cycles, n_lps);
 
-		results_rate[r] = sampled_avg;
+		if (bp.count_rollbacks) {
+			uint h_total_processed = 0, h_total_rolledback = 0;
+			cudaMemcpyFromSymbol(&h_total_processed, g_n_total_processed, sizeof(uint));
+			cudaMemcpyFromSymbol(&h_total_rolledback, g_n_total_rolledback, sizeof(uint));
+
+			float committed = total_events;
+			float processed = (float)h_total_processed;
+			float rolledback = (float)h_total_rolledback;
+			float commit_pct = processed > 0 ? 100.0f * committed / processed : 0;
+			float rollback_pct = processed > 0 ? 100.0f * rolledback / processed : 0;
+			float effective_work = processed - 2.0f * rolledback;
+
+			printf("  Stats:  processed=%10.0f | committed=%10.0f | rolledback=%10.0f\n",
+				processed, committed, rolledback);
+			printf("          commit%%=%.1f%% | rollback%%=%.1f%% | effective_work=%.0f\n",
+				commit_pct, rollback_pct, effective_work);
+			printf("          processed MEv/s=%.3f | rollback MEv/s=%.3f\n",
+				processed / time_ms / 1000.0f, rolledback / time_ms / 1000.0f);
+		}
+
+		cudaEventDestroy(mstart);
+		cudaEventDestroy(mstop);
+	} /* end full mode */
+
+		results_rate[r] = final_rate;
 
 		/* Cleanup */
 		free_queues();
@@ -468,8 +630,6 @@ int main(int argc, char *argv[]) {
 
 		cudaEventDestroy(start);
 		cudaEventDestroy(stop);
-		cudaEventDestroy(mstart);
-		cudaEventDestroy(mstop);
 	}
 
 	/* Summary */

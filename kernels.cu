@@ -13,6 +13,11 @@
 
 #include "kernels.h"
 
+/* Optional stats counters — enabled at runtime via g_track_stats */
+__device__ uint  g_n_total_processed;
+__device__ uint  g_n_total_rolledback;
+__device__ char  g_track_stats;
+
 __global__
 void kernel_set_params(
 uint n_nodes, uint n_lps, uint nodes_per_lp,
@@ -102,6 +107,7 @@ uint *n_inac_4, uint *n_inac_5, uint *n_inac_6) {
 	}
 
 	mark_next_event_as_processed(lpid);
+	if (g_track_stats) { atomicAdd(&g_n_total_processed, 1); }
 
 #if (OPTM_SYNC == 1)
 	set_lpts(lpid, next_event->timestamp);
@@ -127,6 +133,7 @@ void kernel_roll_back(char *rollback_performed) {
 
 		mark_last_processed_event_as_unprocessed(lpid);
 		roll_back_event(last_processed_event);
+		if (g_track_stats) { atomicAdd(&g_n_total_rolledback, 1); }
 		*rollback_performed = 1;
 	}
 
