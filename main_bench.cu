@@ -32,7 +32,7 @@ static	uint	antimsgs_per_node;
 
 static	float	committed_events_threshold;
 static	float	inactive_lps_percent;
-static	int	window_size;
+static	double	window_size;
 
 static	uint	threads_per_block;
 static	uint	n_blocks;
@@ -40,18 +40,18 @@ static	uint	n_blocks;
 /* Private functions */
 size_t	get_free_memory();
 uint	get_number_blocks(uint n_threads);
-int	get_gvt(int *d_ts_temp);
+double	get_gvt(double *d_ts_temp);
 
 /* --- Argument parsing --- */
 
 struct BenchParams {
 	/* PHOLD model */
 	int    population;         // number of nodes
-	int    lookahead;          // integer lookahead added to timestamps
-	int    mean;               // mean of exponential dist (= 1/lambda)
+	double lookahead;          // lookahead added to timestamps
+	double mean;               // mean of exponential dist (= 1/lambda)
 
 	/* Simulation control */
-	int    window;             // window_size for optimistic sync (-1 = unlimited)
+	double window;             // window_size for optimistic sync (negative = unlimited)
 	float  inactive_percent;   // fraction of LPs that must be inactive before GVT advance
 	int    nodes_per_lp_log;   // log2(nodes_per_lp)
 	int    events_per_node;    // event queue capacity per node
@@ -73,9 +73,9 @@ static void print_usage(const char *prog) {
 	printf("Options:\n");
 	printf("  --population N      Number of nodes (default: 65536)\n");
 	printf("  --lambda F          Exponential rate param; mean = 1/lambda (default: 0.0001 => mean=10000)\n");
-	printf("  --mean N            Directly set integer mean (overrides --lambda)\n");
-	printf("  --lookahead N       Integer lookahead (default: 1)\n");
-	printf("  --window N          Window size, -1 for unlimited (default: 1000)\n");
+	printf("  --mean F            Directly set mean (overrides --lambda)\n");
+	printf("  --lookahead F       Lookahead value (default: 1.0)\n");
+	printf("  --window F          Window size, negative for unlimited (default: 1000)\n");
 	printf("  --inactive F        Inactive LP fraction 0.0-1.0 (default: 0.6)\n");
 	printf("  --nodes-per-lp-log N  log2(nodes_per_lp) (default: 6 => 64)\n");
 	printf("  --events-per-node N Event queue capacity per node (default: 64)\n");
@@ -94,9 +94,9 @@ static void print_usage(const char *prog) {
 static BenchParams parse_args(int argc, char *argv[]) {
 	BenchParams p;
 	p.population        = 65536;
-	p.lookahead          = 1;
-	p.mean               = 10000;
-	p.window             = 1000;
+	p.lookahead          = 1.0;
+	p.mean               = 10000.0;
+	p.window             = 1000.0;
 	p.inactive_percent   = 0.6;
 	p.nodes_per_lp_log   = 6;
 	p.events_per_node    = 64;
@@ -121,15 +121,15 @@ static BenchParams parse_args(int argc, char *argv[]) {
 		} else if (strcmp(argv[i], "--lambda") == 0 && i+1 < argc) {
 			double lambda = atof(argv[++i]);
 			if (!mean_set && lambda > 0) {
-				p.mean = (int)(1.0 / lambda);
+				p.mean = 1.0 / lambda;
 			}
 		} else if (strcmp(argv[i], "--mean") == 0 && i+1 < argc) {
-			p.mean = atoi(argv[++i]);
+			p.mean = atof(argv[++i]);
 			mean_set = 1;
 		} else if (strcmp(argv[i], "--lookahead") == 0 && i+1 < argc) {
-			p.lookahead = atoi(argv[++i]);
+			p.lookahead = atof(argv[++i]);
 		} else if (strcmp(argv[i], "--window") == 0 && i+1 < argc) {
-			p.window = atoi(argv[++i]);
+			p.window = atof(argv[++i]);
 		} else if (strcmp(argv[i], "--inactive") == 0 && i+1 < argc) {
 			p.inactive_percent = atof(argv[++i]);
 		} else if (strcmp(argv[i], "--nodes-per-lp-log") == 0 && i+1 < argc) {
@@ -189,10 +189,10 @@ int main(int argc, char *argv[]) {
 #endif
 	);
 	printf("population:      %d\n", bp.population);
-	printf("mean (1/lambda): %d\n", bp.mean);
+	printf("mean (1/lambda): %.6f\n", bp.mean);
 	printf("lambda:          %.6f\n", 1.0 / bp.mean);
-	printf("lookahead:       %d\n", bp.lookahead);
-	printf("window_size:     %d\n", bp.window);
+	printf("lookahead:       %.6f\n", bp.lookahead);
+	printf("window_size:     %.6f\n", bp.window);
 	printf("inactive_pct:    %.2f\n", bp.inactive_percent);
 	printf("nodes_per_lp:    %d (2^%d)\n", 1 << bp.nodes_per_lp_log, bp.nodes_per_lp_log);
 	printf("events_per_node: %d\n", bp.events_per_node);
@@ -231,7 +231,7 @@ int main(int argc, char *argv[]) {
 	threads_per_block = 256;
 	n_blocks = get_number_blocks(n_lps);
 
-	int model_params[] = {(int)n_nodes, bp.lookahead, bp.mean, bp.zero_delay_pct};
+	double model_params[] = {(double)n_nodes, bp.lookahead, bp.mean, (double)bp.zero_delay_pct};
 	uint n_params = 4;
 
 	float results_rate[50];
@@ -240,15 +240,15 @@ int main(int argc, char *argv[]) {
 
 	for (int r = 0; r < n_runs; r++) {
 
-		int	*d_model_params;
-		int	*d_lookahead;
-		int	*d_ts_temp;
+		double	*d_model_params;
+		double	*d_lookahead;
+		double	*d_ts_temp;
 		uint	*d_n_events_cmt;
 		uint	*d_inac_1, *d_inac_2, *d_inac_3;
 		uint	*d_inac_4, *d_inac_5, *d_inac_6;
 		char	*d_rollback_performed;
 
-		int	h_lookahead;
+		double	h_lookahead;
 		uint	h_n_events_cmt;
 		uint	h_inac_1, h_inac_2, h_inac_3;
 		uint	h_inac_4, h_inac_5, h_inac_6;
@@ -266,9 +266,9 @@ int main(int argc, char *argv[]) {
 		}
 
 		if (
-		cudaMalloc(&d_model_params, sizeof(int) * n_params) != cudaSuccess ||
-		cudaMalloc(&d_lookahead,	sizeof(int))	!= cudaSuccess ||
-		cudaMalloc(&d_ts_temp,	sizeof(int) * n_blocks) != cudaSuccess ||
+		cudaMalloc(&d_model_params, sizeof(double) * n_params) != cudaSuccess ||
+		cudaMalloc(&d_lookahead,	sizeof(double))	!= cudaSuccess ||
+		cudaMalloc(&d_ts_temp,	sizeof(double) * n_blocks) != cudaSuccess ||
 		cudaMalloc(&d_n_events_cmt,	sizeof(uint))	!= cudaSuccess ||
 		cudaMalloc(&d_inac_1,		sizeof(uint))	!= cudaSuccess ||
 		cudaMalloc(&d_inac_2,		sizeof(uint))	!= cudaSuccess ||
@@ -281,7 +281,7 @@ int main(int argc, char *argv[]) {
 			return 1;
 		}
 
-		cudaMemcpy(d_model_params, model_params, sizeof(int) * n_params,
+		cudaMemcpy(d_model_params, model_params, sizeof(double) * n_params,
 			cudaMemcpyHostToDevice);
 
 		h_n_events_cmt = 0;
@@ -311,7 +311,7 @@ int main(int argc, char *argv[]) {
 			d_model_params, n_params);
 
 		kernel_get_lookahead<<<1,1>>>(d_lookahead);
-		cudaMemcpy(&h_lookahead, d_lookahead, sizeof(int),
+		cudaMemcpy(&h_lookahead, d_lookahead, sizeof(double),
 			cudaMemcpyDeviceToHost);
 
 		kernel_init_queues<<<n_blocks, threads_per_block>>>();
@@ -333,7 +333,7 @@ int main(int argc, char *argv[]) {
 	if (bp.minimal) {
 		/* ---- MINIMAL MODE: no sampling, no sync, just run ---- */
 		while (1) {
-			int gvt = get_gvt(d_ts_temp);
+			double gvt = get_gvt(d_ts_temp);
 
 			h_n_events_cmt = 0;
 			cudaMemcpy(d_n_events_cmt, &h_n_events_cmt, sizeof(uint),
@@ -450,7 +450,7 @@ int main(int argc, char *argv[]) {
 		cudaEventRecord(mstart);
 
 		while (1) {
-			int gvt = get_gvt(d_ts_temp);
+			double gvt = get_gvt(d_ts_temp);
 
 			h_n_events_cmt = 0;
 			cudaMemcpy(d_n_events_cmt, &h_n_events_cmt, sizeof(uint),
@@ -481,7 +481,7 @@ int main(int argc, char *argv[]) {
 				sum_rates += rate;
 				n_measurements++;
 
-				printf("  [run %d, sample %d] MEv/s: %8.3f | GVT: %d\n",
+				printf("  [run %d, sample %d] MEv/s: %8.3f | GVT: %.2f\n",
 					r, n_measurements, rate, gvt);
 
 				measuring = 0;
@@ -657,9 +657,9 @@ uint get_number_blocks(uint n_threads) {
 		(n_threads % threads_per_block == 0 ? 0 : 1);
 }
 
-int get_gvt(int *d_ts_temp) {
+double get_gvt(double *d_ts_temp) {
 	kernel_get_gvt_1<<<n_blocks, threads_per_block,
-			threads_per_block * sizeof(int)>>>(d_ts_temp);
+			threads_per_block * sizeof(double)>>>(d_ts_temp);
 
 	uint next_n_blocks = get_number_blocks(n_blocks);
 	uint n_left = n_blocks;
@@ -667,15 +667,15 @@ int get_gvt(int *d_ts_temp) {
 
 	while (n_left != 1) {
 		kernel_get_gvt_2<<<next_n_blocks, threads_per_block,
-			threads_per_block * sizeof(int)>>>(
+			threads_per_block * sizeof(double)>>>(
 				d_ts_temp, n_left, distance);
 		n_left = next_n_blocks;
 		next_n_blocks = get_number_blocks(next_n_blocks);
 		distance *= threads_per_block;
 	}
 
-	int gvt;
-	cudaMemcpy(&gvt, d_ts_temp, sizeof(int),
+	double gvt;
+	cudaMemcpy(&gvt, d_ts_temp, sizeof(double),
 		cudaMemcpyDeviceToHost);
 
 	return gvt;

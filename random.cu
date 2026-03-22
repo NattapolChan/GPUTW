@@ -19,9 +19,9 @@ uint random(curandState_t *state, uint max) {
 }
 
 __device__
-uint random_exp(curandState_t *state, uint mean) {
-	float ru = curand_uniform(state);
-	return -(mean * logf(ru));
+double random_exp(curandState_t *state, double mean) {
+	double ru = curand_uniform_double(state);
+	return -mean * log(ru);
 }
 
 __device__ // private

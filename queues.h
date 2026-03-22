@@ -28,8 +28,8 @@ typedef struct {
 
 #if (OPTM_SYNC == 1)
 	uint	*famo;	// First antimsg offset
-	int	*rbts;	// Rollback timestamp
-	int	*lpts;	// Last processed timestamp;
+	double	*rbts;	// Rollback timestamp
+	double	*lpts;	// Last processed timestamp;
 #endif
 
 	Event	*events;
@@ -103,10 +103,10 @@ void mark_next_event_as_processed(uint lpid);
 
 #if (OPTM_SYNC == 1)
 __device__
-void set_lpts(uint lpid, int timestamp);
+void set_lpts(uint lpid, double timestamp);
 
 __device__
-int get_lpts(uint lpid);
+double get_lpts(uint lpid);
 #endif
 
 __device__ // Returns 0 if event queue is full.
@@ -125,7 +125,7 @@ void undo_event(uint nid, uint undo_offset);
 
 #if (OPTM_SYNC == 1)
 __device__
-int get_rollback_timestamp(uint lpid);
+double get_rollback_timestamp(uint lpid);
 #endif
 
 __device__

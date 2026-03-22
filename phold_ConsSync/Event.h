@@ -19,7 +19,7 @@ typedef struct {
 	uint	type;
 	uint	sender;
 	uint	receiver;
-	int	timestamp;
+	double	timestamp;
 } Event;
 
 __device__

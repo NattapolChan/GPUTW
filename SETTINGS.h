@@ -15,9 +15,9 @@
 #ifndef SETTINGS_h
 #define	SETTINGS_h
 
-#define EVENT_HEADER	"./phold_OptmSync/Event.h"
-#define STATE_HEADER	"./phold_OptmSync/State.h"
-#define MODEL_HEADER	"./phold_OptmSync/model.h"
+#define EVENT_HEADER	"./phold_RevsComp/Event.h"
+#define STATE_HEADER	"./phold_RevsComp/State.h"
+#define MODEL_HEADER	"./phold_RevsComp/model.h"
 
 #define	OPTM_SYNC	1
 #define ALLOW_ME	1

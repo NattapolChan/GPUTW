@@ -12,6 +12,21 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 
 #include "queues.h"
+#include <float.h>
+
+/* atomicMin for double via CAS — CUDA has no native version */
+__device__
+double atomicMinDouble(double *address, double val) {
+	unsigned long long int *addr_as_ull = (unsigned long long int *)address;
+	unsigned long long int old = *addr_as_ull, assumed;
+	do {
+		assumed = old;
+		double old_val = __longlong_as_double(assumed);
+		if (old_val <= val) break;
+		old = atomicCAS(addr_as_ull, assumed, __double_as_longlong(val));
+	} while (assumed != old);
+	return __longlong_as_double(old);
+}
 
 __device__ static EQs	eq;
 __device__ static SQs	sq;
@@ -63,12 +78,12 @@ uint events_per_node, uint states_per_node, uint antimsgs_per_node) {
 	cudaMemcpyToSymbol(eq, &h_eq, sizeof(EQs));
 
 	err = cudaMalloc(&(h_eq.rbts),
-		sizeof(int) * n_nodes);
+		sizeof(double) * n_nodes);
 	if (err != cudaSuccess) { return 0; }
 	cudaMemcpyToSymbol(eq, &h_eq, sizeof(EQs));
 
 	err = cudaMalloc(&(h_eq.lpts),
-		sizeof(int) * n_nodes);
+		sizeof(double) * n_nodes);
 	if (err != cudaSuccess) { return 0; }
 	cudaMemcpyToSymbol(eq, &h_eq, sizeof(EQs));
 #endif
@@ -164,8 +179,8 @@ void init_queues(uint lpid) {
 
 #if (OPTM_SYNC == 1)
 	eq.famo[lpid] = UINT_MAX;
-	eq.rbts[lpid] = INT_MAX;
-	eq.lpts[lpid] = 0;
+	eq.rbts[lpid] = DBL_MAX;
+	eq.lpts[lpid] = 0.0;
 #endif
 
 	sq.bo[lpid] = 0;
@@ -355,7 +370,7 @@ void print_event_queue(uint lpid) {
 	for (uint i = 0; i < eq.ql[lpid]; i++) {
 		if (i % 3 == 0) { printf("\n"); }
 		Event *event = get_event(lpid, i);
-		printf("(S=%u R=%u T=%d) ",
+		printf("(S=%u R=%u T=%.4f) ",
 			event->sender, event->receiver, event->timestamp);
 	}
 
@@ -480,7 +495,7 @@ void sort_event_queue(uint lpid) {
 	}
 
 #if (OPTM_SYNC == 1)
-	eq.rbts[lpid] = INT_MAX;
+	eq.rbts[lpid] = DBL_MAX;
 	eq.famo[lpid] = UINT_MAX;
 #endif
 }
@@ -502,12 +517,12 @@ void mark_next_event_as_processed(uint lpid) {
 
 #if (OPTM_SYNC == 1)
 __device__
-void set_lpts(uint lpid, int timestamp) {
+void set_lpts(uint lpid, double timestamp) {
 	eq.lpts[lpid] = timestamp;
 }
 
 __device__
-int get_lpts(uint lpid) {
+double get_lpts(uint lpid) {
 	return eq.lpts[lpid];
 }
 #endif
@@ -525,7 +540,7 @@ char append_event_to_queue(Event *event) {
 	}
 
 #if (OPTM_SYNC == 1)
-	atomicMin(&(eq.rbts[lpid]), event->timestamp);
+	atomicMinDouble(&(eq.rbts[lpid]), event->timestamp);
 #endif
 
 	Event *target_event = get_event(lpid, eq_ql_old);
@@ -545,7 +560,7 @@ char append_event_to_queue(Event *event, uint *undo_offset) {
 	}
 
 #if (OPTM_SYNC == 1)
-	atomicMin(&(eq.rbts[lpid]), event->timestamp);
+	atomicMinDouble(&(eq.rbts[lpid]), event->timestamp);
 #endif
 
 	Event *target_event = get_event(lpid, eq_ql_old);
@@ -567,7 +582,7 @@ void undo_event(Event *event) {
 		if (events_are_equal(e, event)) {
 			e->timestamp = -(e->timestamp);
 
-			atomicMin(&(eq.rbts[lpid]), event->timestamp);
+			atomicMinDouble(&(eq.rbts[lpid]), event->timestamp);
 			atomicMin(&(eq.famo[lpid]), offset);
 
 			return;
@@ -588,7 +603,7 @@ void undo_event(uint lpid, uint undo_offset) {
 
 #if (OPTM_SYNC == 1)
 __device__
-int get_rollback_timestamp(uint lpid) {
+double get_rollback_timestamp(uint lpid) {
 	return eq.rbts[lpid];
 }
 #endif

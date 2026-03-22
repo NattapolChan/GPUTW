@@ -31,10 +31,10 @@ char malloc_nodes(uint n_nodes);
 void free_nodes();
 
 __device__
-void set_model_params(int params[], uint n_params);
+void set_model_params(double params[], uint n_params);
 
 __device__
-int get_lookahead();
+double get_lookahead();
 
 __device__
 void init_node(uint nid);

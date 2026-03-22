@@ -17,8 +17,8 @@
 __device__ static Nodes	nodes;
 
 __device__ static uint	population;
-__device__ static int	lookahead;
-__device__ static int	mean;
+__device__ static double	lookahead;
+__device__ static double	mean;
 __device__ static int	zero_delay_pct;
 
 char malloc_nodes(uint n_nodes) {
@@ -41,15 +41,15 @@ void free_nodes() {
 }
 
 __device__
-void set_model_params(int params[], uint n_params) {
-	population = params[0];
+void set_model_params(double params[], uint n_params) {
+	population = (uint)params[0];
 	lookahead = params[1];
 	mean = params[2];
-	zero_delay_pct = n_params > 3 ? params[3] : 50;
+	zero_delay_pct = n_params > 3 ? (int)params[3] : 50;
 }
 
 __device__
-int get_lookahead() {
+double get_lookahead() {
 	return lookahead;
 }
 
@@ -65,7 +65,7 @@ void init_node(uint nid) {
 		event.type = 1;
 		event.sender = nid;
 		event.receiver = nid;
-		event.timestamp = i;
+		event.timestamp = (double)i;
 
 		append_event_to_queue(&event);
 	}
@@ -81,12 +81,11 @@ char handle_event_type_1(Event *event) {
 	new_event.sender = nid;
 	new_event.receiver = random(cr_state, g_n_nodes);
 
-    if (zero_delay_pct > 0 && random(cr_state, 100) < zero_delay_pct) {
-        new_event.timestamp = event->timestamp + 1;
+    if (zero_delay_pct > 0 && random(cr_state, 100) < (uint)zero_delay_pct) {
+        new_event.timestamp = event->timestamp + lookahead;
     } else {
-        int advance = lookahead + random_exp(cr_state, mean);
-        if (advance < 1) advance = 1;
-        new_event.timestamp = event->timestamp + advance;
+        new_event.timestamp = event->timestamp + lookahead +
+            random_exp(cr_state, mean);
     }
 
 	char res = append_event_to_queue(&new_event);
@@ -114,12 +113,11 @@ void reverse_event_type_1(Event *event) {
 	antimsg.type = 1;
 	antimsg.sender = nid;
 	antimsg.receiver = random(&cr_state_old, g_n_nodes);
-	if (zero_delay_pct > 0 && random(&cr_state_old, 100) < zero_delay_pct) {
-		antimsg.timestamp = abs(event->timestamp) + 1;
+	if (zero_delay_pct > 0 && random(&cr_state_old, 100) < (uint)zero_delay_pct) {
+		antimsg.timestamp = fabs(event->timestamp) + lookahead;
 	} else {
-		int advance = lookahead + random_exp(&cr_state_old, mean);
-		if (advance < 1) advance = 1;
-		antimsg.timestamp = abs(event->timestamp) + advance;
+		antimsg.timestamp = fabs(event->timestamp) + lookahead +
+			random_exp(&cr_state_old, mean);
 	}
 
 	undo_event(&antimsg);

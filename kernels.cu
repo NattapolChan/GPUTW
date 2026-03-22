@@ -12,6 +12,7 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 
 #include "kernels.h"
+#include <float.h>
 
 /* Optional stats counters — enabled at runtime via g_track_stats */
 __device__ uint  g_n_total_processed;
@@ -22,7 +23,7 @@ __global__
 void kernel_set_params(
 uint n_nodes, uint n_lps, uint nodes_per_lp,
 uint events_per_node, uint states_per_node, uint antimsgs_per_node,
-int model_params[], uint n_params) {
+double model_params[], uint n_params) {
 	g_n_nodes = n_nodes;
 	g_n_lps = n_lps; 
 	g_nodes_per_lp = nodes_per_lp;
@@ -32,7 +33,7 @@ int model_params[], uint n_params) {
 }
 
 __global__
-void kernel_get_lookahead(int *lookahead) {
+void kernel_get_lookahead(double *lookahead) {
 	*lookahead = get_lookahead();
 }
 
@@ -56,7 +57,7 @@ void kernel_init_nodes() {
 }
 
 __global__
-void kernel_handle_next_event(int gvt, int window_size,
+void kernel_handle_next_event(double gvt, double window_size,
 uint *n_inac_1, uint *n_inac_2, uint *n_inac_3,
 uint *n_inac_4, uint *n_inac_5, uint *n_inac_6) {
 	uint lpid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -69,13 +70,13 @@ uint *n_inac_4, uint *n_inac_5, uint *n_inac_6) {
 
 	Event *next_event = get_next_event(lpid);
 
-	if (window_size != -1 && next_event->timestamp >= gvt + window_size) {
+	if (window_size >= 0.0 && next_event->timestamp >= gvt + window_size) {
 		atomicAdd(n_inac_2, 1);
 		return;
 	}
 
 #if (OPTM_SYNC == 1)
-	int rollback_timestamp = get_rollback_timestamp(lpid);
+	double rollback_timestamp = get_rollback_timestamp(lpid);
 	if (next_event->timestamp >= rollback_timestamp) {
 		atomicAdd(n_inac_2, 1);
 		return;
@@ -120,14 +121,14 @@ void kernel_roll_back(char *rollback_performed) {
 	uint lpid = blockIdx.x * blockDim.x + threadIdx.x;
 	if (lpid >= g_n_lps) { return; }
 
-	int rollback_timestamp = get_rollback_timestamp(lpid);	
+	double rollback_timestamp = get_rollback_timestamp(lpid);
 	if (get_lpts(lpid) < rollback_timestamp) { return; }
 
 	while (has_processed_event(lpid)) {
 		Event *last_processed_event = get_last_processed_event(lpid);
 
 		if (
-		abs(last_processed_event->timestamp) < rollback_timestamp) {
+		fabs(last_processed_event->timestamp) < rollback_timestamp) {
 			break;
 		}
 
@@ -137,7 +138,7 @@ void kernel_roll_back(char *rollback_performed) {
 		*rollback_performed = 1;
 	}
 
-	set_lpts(lpid, rollback_timestamp - 1);
+	set_lpts(lpid, nextafter(rollback_timestamp, -DBL_MAX));
 }
 
 __global__
@@ -149,7 +150,7 @@ void kernel_roll_back_all() {
 		Event *last_processed_event = get_last_processed_event(lpid);
 		mark_last_processed_event_as_unprocessed(lpid);
 		roll_back_event(last_processed_event);
-		set_lpts(lpid, abs(last_processed_event->timestamp) - 1);
+		set_lpts(lpid, nextafter(fabs(last_processed_event->timestamp), -DBL_MAX));
 	}
 }
 #endif
@@ -241,7 +242,7 @@ void kernel_sort_event_queues() {
 }
 
 __global__
-void kernel_clean_queues(uint gvt, uint *n_events_cleaned) {
+void kernel_clean_queues(double gvt, uint *n_events_cleaned) {
 	uint lpid = blockIdx.x * blockDim.x + threadIdx.x;
 	if (lpid >= g_n_lps) { return; }
 
@@ -294,26 +295,26 @@ void kernel_print_statistics() {
 }
 
 __device__ //private
-void warp_reduce(volatile int *sdata, uint tid) {
-	sdata[tid] = min(sdata[tid], sdata[tid + 32]);
-	sdata[tid] = min(sdata[tid], sdata[tid + 16]);
-	sdata[tid] = min(sdata[tid], sdata[tid +  8]);
-	sdata[tid] = min(sdata[tid], sdata[tid +  4]);
-	sdata[tid] = min(sdata[tid], sdata[tid +  2]);
-	sdata[tid] = min(sdata[tid], sdata[tid +  1]);
+void warp_reduce(volatile double *sdata, uint tid) {
+	sdata[tid] = fmin(sdata[tid], sdata[tid + 32]);
+	sdata[tid] = fmin(sdata[tid], sdata[tid + 16]);
+	sdata[tid] = fmin(sdata[tid], sdata[tid +  8]);
+	sdata[tid] = fmin(sdata[tid], sdata[tid +  4]);
+	sdata[tid] = fmin(sdata[tid], sdata[tid +  2]);
+	sdata[tid] = fmin(sdata[tid], sdata[tid +  1]);
 }
 
 __global__
-void kernel_get_gvt_1(int *ts_temp) {
-	extern __shared__ int sdata[];
+void kernel_get_gvt_1(double *ts_temp) {
+	extern __shared__ double sdata[];
 
 	uint tid = threadIdx.x;
 	uint gid = blockIdx.x * blockDim.x + threadIdx.x;
 
 	if (gid >= g_n_lps) {
-		sdata[tid] = INT_MAX;
+		sdata[tid] = DBL_MAX;
 	} else if (has_next_event(gid) == 0) {
-		sdata[tid] = INT_MAX;
+		sdata[tid] = DBL_MAX;
 	} else {
 		sdata[tid] = get_next_event(gid)->timestamp;
 	}
@@ -322,7 +323,7 @@ void kernel_get_gvt_1(int *ts_temp) {
 
 	for (uint s = blockDim.x / 2; s > 32; s >>= 1) {
 		if (tid < s) {
-			sdata[tid] = min(sdata[tid], sdata[tid + s]);
+			sdata[tid] = fmin(sdata[tid], sdata[tid + s]);
 		}
 
 		__syncthreads();
@@ -334,18 +335,18 @@ void kernel_get_gvt_1(int *ts_temp) {
 }
 
 __global__
-void kernel_get_gvt_2(int *ts_temp, uint n, uint distance) {
-	extern __shared__ int sdata[];
+void kernel_get_gvt_2(double *ts_temp, uint n, uint distance) {
+	extern __shared__ double sdata[];
 
 	uint tid = threadIdx.x;
 	uint gid = blockIdx.x * blockDim.x + threadIdx.x;
 
-	sdata[tid] = gid < n ? ts_temp[gid * distance] : INT_MAX;
+	sdata[tid] = gid < n ? ts_temp[gid * distance] : DBL_MAX;
 	__syncthreads();
 
 	for (uint s = blockDim.x / 2; s > 32; s >>= 1) {
 		if (tid < s) {
-			sdata[tid] = min(sdata[tid], sdata[tid + s]);
+			sdata[tid] = fmin(sdata[tid], sdata[tid + s]);
 		}
 
 		__syncthreads();

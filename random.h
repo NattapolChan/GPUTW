@@ -22,7 +22,7 @@ __device__
 uint random(curandState_t *state, uint max);
 
 __device__
-uint random_exp(curandState_t *state, uint mean);
+double random_exp(curandState_t *state, double mean);
 
 __device__
 void reverse_state(curandState_t *state);

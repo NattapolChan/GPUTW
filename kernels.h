@@ -25,10 +25,10 @@ __global__
 void kernel_set_params(
 uint n_nodes, uint n_lps, uint nodes_per_lp,
 uint events_per_node, uint states_per_node, uint antimsgs_per_node,
-int model_params[], uint n_params);
+double model_params[], uint n_params);
 
 __global__
-void kernel_get_lookahead(int *lookahead);
+void kernel_get_lookahead(double *lookahead);
 
 __global__
 void kernel_init_queues();
@@ -37,7 +37,7 @@ __global__
 void kernel_init_nodes();
 
 __global__
-void kernel_handle_next_event(int gvt, int window_size,
+void kernel_handle_next_event(double gvt, double window_size,
 uint *n_inac_1, uint *n_inac_2, uint *n_inac_3,
 uint *n_inac_4, uint *n_inac_5, uint *n_inac_6);
 
@@ -77,7 +77,7 @@ __global__
 void kernel_sort_event_queues();
 
 __global__
-void kernel_clean_queues(uint gvt, uint *n_events_cleaned);
+void kernel_clean_queues(double gvt, uint *n_events_cleaned);
 
 __global__
 void kernel_collect_statistics();
@@ -86,10 +86,10 @@ __global__
 void kernel_print_statistics();
 
 __global__
-void kernel_get_gvt_1(int *ts_temp);
+void kernel_get_gvt_1(double *ts_temp);
 
 __global__
-void kernel_get_gvt_2(int *ts_temp, uint n, uint distance);
+void kernel_get_gvt_2(double *ts_temp, uint n, uint distance);
 
 __global__
 void kernel_print_event_queue(uint lpid);
