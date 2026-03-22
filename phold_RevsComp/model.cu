@@ -19,6 +19,7 @@ __device__ static Nodes	nodes;
 __device__ static uint	population;
 __device__ static int	lookahead;
 __device__ static int	mean;
+__device__ static int	zero_delay_pct;
 
 char malloc_nodes(uint n_nodes) {
 	cudaError_t err;
@@ -44,6 +45,7 @@ void set_model_params(int params[], uint n_params) {
 	population = params[0];
 	lookahead = params[1];
 	mean = params[2];
+	zero_delay_pct = n_params > 3 ? params[3] : 50;
 }
 
 __device__
@@ -78,8 +80,13 @@ char handle_event_type_1(Event *event) {
 	new_event.type = 1;
 	new_event.sender = nid;
 	new_event.receiver = random(cr_state, g_n_nodes);
-	new_event.timestamp = event->timestamp + lookahead +
-		random_exp(cr_state, mean);
+
+    if (zero_delay_pct > 0 && random(cr_state, 100) < zero_delay_pct) {
+        new_event.timestamp = event->timestamp + 1;
+    } else {
+        new_event.timestamp = event->timestamp + lookahead +
+            random_exp(cr_state, mean);
+    }
 
 	char res = append_event_to_queue(&new_event);
 
@@ -106,8 +113,12 @@ void reverse_event_type_1(Event *event) {
 	antimsg.type = 1;
 	antimsg.sender = nid;
 	antimsg.receiver = random(&cr_state_old, g_n_nodes);
-	antimsg.timestamp = abs(event->timestamp) + lookahead +
-		random_exp(&cr_state_old, mean);
+	if (zero_delay_pct > 0 && random(&cr_state_old, 100) < zero_delay_pct) {
+		antimsg.timestamp = abs(event->timestamp) + 1;
+	} else {
+		antimsg.timestamp = abs(event->timestamp) + lookahead +
+			random_exp(&cr_state_old, mean);
+	}
 
 	undo_event(&antimsg);
 }

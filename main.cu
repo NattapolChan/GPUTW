@@ -54,7 +54,7 @@ char	split_lps(char *d_can_split);
 int main() {
 
 // n -> number of nodes
-for (int n = 1048576; n >= 16384; n /= 2) {
+for (int n = 262144; n >= 65536; n /= 2) {
 
 	float results_avg[50];
 	float results_min[50];
@@ -69,18 +69,18 @@ for (int r = 0; r < n_tests; r++) {
 /* For PHOLD model with lambda = 1 or 100 */
 //	float	initial_p2[] = {1000, 1000, 5000, 1000};
 /* For PHOLD model with lambda = 10000 */
-	float	initial_p2[] = {1000, 1000, 50000, 1000};
+	float	initial_p2[] = {1000, 1000, 5000, 1000};
 /* For Kademlia models */	
 //	float	initial_p2[] = { 100,  100, 1000,  100};
 
-	float	initial_p3[] = { 0.5,  0.5,  0.5,  4.5};
+	const float	initial_p3[] = {6, 0.45, 0.5, 0.5};
 
 	nodes_per_lp = pow(2, (int) initial_p3[0]);
 	n_nodes = n;
 	n_lps = n_nodes / nodes_per_lp;
 
 /* For PHOLD models */
-	events_per_node = 50;
+	events_per_node = 64;
 	states_per_node = 30;
 	antimsgs_per_node = 30;
 
@@ -96,7 +96,7 @@ for (int r = 0; r < n_tests; r++) {
 /* For PHOLD models
  * Parameters are: population, lookahead, mean
  */
-	int model_params[] = {n, 1000, 10000};
+	int model_params[] = {n, 1, 10000};
 	uint n_params = 3;
 
 /* For Kademlia models */
@@ -250,6 +250,29 @@ for (int r = 0; r < n_tests; r++) {
 			flag_continue = 1;
 		} else if (warm_up == 1 && time > 300){
 			warm_up = 0;
+
+            float active_percent = (1.0 - inactive_lps_percent);
+			float theoretical_raw_rate = 0;
+
+			if (active_percent > 0.01) {
+				theoretical_raw_rate = current_rate / active_percent;
+			}
+
+			printf("Threshold: %4.2f | Active: %3.0f%% | Eff Rate: %8.3f MEv/s | Raw Ceiling: %8.3f MEv/s",
+				inactive_lps_percent,
+				active_percent * 100,
+				current_rate,
+				theoretical_raw_rate);
+
+			if (current_rate < min_rate) {
+				min_rate = current_rate;
+				printf(" --> MIN");
+			} else if (current_rate > max_rate) {
+				max_rate = current_rate;
+				printf(" --> MAX");
+			}
+
+			printf("\n");
 
 //			printf("%4.2f %6d %2u %10.3f %10.0f %10d",
 //				inactive_lps_percent, window_size,

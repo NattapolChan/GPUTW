@@ -517,6 +517,8 @@ char append_event_to_queue(Event *event) {
 	uint lpid = event->receiver / g_nodes_per_lp;
 
 	uint eq_ql_old = atomicAdd(&(eq.ql[lpid]), 1);
+
+    // printf("queue length %d\n", eq_ql_old);
 	if (eq_ql_old >= events_per_lp) {
 		atomicSub(&(eq.ql[lpid]), 1);
 		return 0;
@@ -536,6 +538,7 @@ char append_event_to_queue(Event *event, uint *undo_offset) {
 	uint lpid = event->receiver / g_nodes_per_lp;
 
 	uint eq_ql_old = atomicAdd(&(eq.ql[lpid]), 1);
+    // printf("queue length %d\n", eq_ql_old);
 	if (eq_ql_old >= events_per_lp) {
 		atomicSub(&(eq.ql[lpid]), 1);
 		return 0;
