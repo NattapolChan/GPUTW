@@ -46,7 +46,7 @@ char*	get_time();
 size_t	get_free_memory();
 void	print_size(size_t size);
 uint	get_number_blocks(uint n_threads);
-int	get_gvt(int *d_ts_temp);
+double get_gvt(double *d_ts_temp);
 char	change_nodes_per_lp(uint target_value_log, char *d_can_split);
 void	merge_lps();
 char	split_lps(char *d_can_split);
@@ -115,9 +115,9 @@ for (int r = 0; r < n_tests; r++) {
 	threads_per_block = 256;
 	n_blocks = get_number_blocks(n_lps);
 
-	int	*d_model_params;
-	int	*d_lookahead;
-	int	*d_ts_temp;
+	double *d_model_params;
+	double *d_lookahead;
+	double *d_ts_temp;
 	uint	*d_n_events_cmt;
 	uint	*d_inac_1, *d_inac_2, *d_inac_3;
 	uint	*d_inac_4, *d_inac_5, *d_inac_6;
@@ -216,7 +216,7 @@ for (int r = 0; r < n_tests; r++) {
 
 	while (1) {
 		// Get minimal timestamp of all next events
-		int gvt = get_gvt(d_ts_temp);
+		double gvt = get_gvt(d_ts_temp);
 
 		// Delete past events
 		h_n_events_cmt = 0;
@@ -502,9 +502,9 @@ uint get_number_blocks(uint n_threads) {
 		(n_threads % threads_per_block == 0 ? 0 : 1);
 }
 
-int get_gvt(int *d_ts_temp) {
+double get_gvt(double *d_ts_temp) {
 	kernel_get_gvt_1<<<n_blocks, threads_per_block,
-			threads_per_block * sizeof(int)>>>(d_ts_temp);
+			threads_per_block * sizeof(double)>>>(d_ts_temp);
 
 	uint next_n_blocks = get_number_blocks(n_blocks);
 	uint n_left = n_blocks;
@@ -512,15 +512,15 @@ int get_gvt(int *d_ts_temp) {
 
 	while (n_left != 1) {
 		kernel_get_gvt_2<<<next_n_blocks, threads_per_block,
-			threads_per_block * sizeof(int)>>>(
+			threads_per_block * sizeof(double)>>>(
 				d_ts_temp, n_left, distance);
 		n_left = next_n_blocks;
 		next_n_blocks = get_number_blocks(next_n_blocks);
 		distance *= threads_per_block;
 	} 
 
-	int gvt;
-	cudaMemcpy(&gvt, d_ts_temp, sizeof(int),
+	double gvt;
+	cudaMemcpy(&gvt, d_ts_temp, sizeof(double),
 		cudaMemcpyDeviceToHost);
 
 	return gvt;

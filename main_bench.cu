@@ -66,6 +66,7 @@ struct BenchParams {
 	int    measure_ms;         // measurement window in ms
 	int    count_rollbacks;    // enable rollback/processed counting
 	int    minimal;            // minimal mode: no sampling, no stats, just final MEv/s
+	const char *trace_file;    // trace CSV output path (NULL = disabled)
 };
 
 static void print_usage(const char *prog) {
@@ -88,6 +89,7 @@ static void print_usage(const char *prog) {
 	printf("  --measure N         Measurement window in ms (default: 300)\n");
 	printf("  --count-rollbacks   Enable processed/rollback counters (has overhead)\n");
 	printf("  --minimal           Minimal mode: no sampling, no stats, just final MEv/s\n");
+	printf("  --trace FILE        Write per-superstep trace CSV (implies --count-rollbacks)\n");
 	printf("  --help              Show this help\n");
 }
 
@@ -109,6 +111,7 @@ static BenchParams parse_args(int argc, char *argv[]) {
 	p.measure_ms         = 300;
 	p.count_rollbacks    = 0;
 	p.minimal            = 0;
+	p.trace_file         = NULL;
 
 	int mean_set = 0;
 
@@ -156,6 +159,9 @@ static BenchParams parse_args(int argc, char *argv[]) {
 			p.count_rollbacks = 1;
 		} else if (strcmp(argv[i], "--minimal") == 0) {
 			p.minimal = 1;
+		} else if (strcmp(argv[i], "--trace") == 0 && i+1 < argc) {
+			p.trace_file = argv[++i];
+			p.count_rollbacks = 1;  // trace implies rollback counting
 		} else {
 			printf("Unknown option: %s\n", argv[i]);
 			print_usage(argv[0]);
@@ -204,6 +210,7 @@ int main(int argc, char *argv[]) {
 	printf("warmup:          %d ms\n", bp.warmup_ms);
 	printf("measure:         %d ms\n", bp.measure_ms);
 	printf("count_rollbacks: %s\n", bp.count_rollbacks ? "yes" : "no");
+	printf("trace_file:      %s\n", bp.trace_file ? bp.trace_file : "(none)");
 	printf("=============================\n\n");
 
 	/* Setup fixed parameters */
@@ -233,6 +240,20 @@ int main(int argc, char *argv[]) {
 
 	double model_params[] = {(double)n_nodes, bp.lookahead, bp.mean, (double)bp.zero_delay_pct};
 	uint n_params = 4;
+
+	FILE *trace_fp = NULL;
+	if (bp.trace_file) {
+		trace_fp = fopen(bp.trace_file, "w");
+		if (!trace_fp) {
+			printf("ERROR: cannot open trace file: %s\n", bp.trace_file);
+			return 1;
+		}
+		fprintf(trace_fp,
+			"run,superstep,wall_ms,gvt,"
+			"exec_cycles,processed,rolledback,committed,"
+			"inactive,inac_no_event,inac_window,"
+			"inac_handle_fail,inac_eq_full,inac_sq_full,inac_amq_full\n");
+	}
 
 	float results_rate[50];
 	int n_runs = bp.n_runs;
@@ -332,6 +353,10 @@ int main(int argc, char *argv[]) {
 
 	if (bp.minimal) {
 		/* ---- MINIMAL MODE: no sampling, no sync, just run ---- */
+		struct timespec ts_start_wall;
+		if (trace_fp) clock_gettime(CLOCK_MONOTONIC, &ts_start_wall);
+		uint superstep = 0;
+
 		while (1) {
 			double gvt = get_gvt(d_ts_temp);
 
@@ -350,6 +375,17 @@ int main(int argc, char *argv[]) {
 				break;
 			}
 
+			uint prev_processed = 0, prev_rolledback = 0;
+			if (trace_fp) {
+				cudaMemcpyFromSymbol(&prev_processed, g_n_total_processed, sizeof(uint));
+				cudaMemcpyFromSymbol(&prev_rolledback, g_n_total_rolledback, sizeof(uint));
+			}
+
+			uint step_exec_cycles = 0;
+			uint64_t step_total_inac = 0;
+			uint64_t step_inac_1 = 0, step_inac_2 = 0, step_inac_3 = 0;
+			uint64_t step_inac_4 = 0, step_inac_5 = 0, step_inac_6 = 0;
+
 			while (1) {
 				h_inac_1 = h_inac_2 = h_inac_3 = 0;
 				h_inac_4 = h_inac_5 = h_inac_6 = 0;
@@ -365,6 +401,8 @@ int main(int argc, char *argv[]) {
 					cudaMemcpyHostToDevice);
 				cudaMemcpy(d_inac_6, &h_inac_6, sizeof(uint),
 					cudaMemcpyHostToDevice);
+
+				step_exec_cycles++;
 
 #if (OPTM_SYNC == 1)
 				kernel_handle_next_event<<<
@@ -393,6 +431,12 @@ int main(int argc, char *argv[]) {
 				cudaMemcpy(&h_inac_6, d_inac_6, sizeof(uint),
 					cudaMemcpyDeviceToHost);
 
+				if (trace_fp) {
+					step_inac_1 += h_inac_1; step_inac_2 += h_inac_2;
+					step_inac_3 += h_inac_3; step_inac_4 += h_inac_4;
+					step_inac_5 += h_inac_5; step_inac_6 += h_inac_6;
+				}
+
 #if (ALLOW_ME == 1)
 				uint inac =
 					h_inac_1 + h_inac_2 + h_inac_3 +
@@ -418,6 +462,33 @@ int main(int argc, char *argv[]) {
 			}
 #endif
 
+			if (trace_fp) {
+				uint cur_processed = 0, cur_rolledback = 0;
+				cudaMemcpyFromSymbol(&cur_processed, g_n_total_processed, sizeof(uint));
+				cudaMemcpyFromSymbol(&cur_rolledback, g_n_total_rolledback, sizeof(uint));
+
+				uint step_processed = cur_processed - prev_processed;
+				uint step_rolledback = cur_rolledback - prev_rolledback;
+				step_total_inac = step_inac_1 + step_inac_2 + step_inac_3 +
+					step_inac_4 + step_inac_5 + step_inac_6;
+
+				struct timespec ts_now;
+				clock_gettime(CLOCK_MONOTONIC, &ts_now);
+				double wall_ms = (ts_now.tv_sec - ts_start_wall.tv_sec) * 1000.0 +
+					(ts_now.tv_nsec - ts_start_wall.tv_nsec) / 1e6;
+
+				fprintf(trace_fp,
+					"%d,%u,%.4f,%.6f,"
+					"%u,%u,%u,%u,"
+					"%lu,%lu,%lu,%lu,%lu,%lu,%lu\n",
+					r, superstep, wall_ms, gvt,
+					step_exec_cycles, step_processed, step_rolledback, h_n_events_cmt,
+					(unsigned long)step_total_inac,
+					(unsigned long)step_inac_1, (unsigned long)step_inac_2,
+					(unsigned long)step_inac_3, (unsigned long)step_inac_4,
+					(unsigned long)step_inac_5, (unsigned long)step_inac_6);
+			}
+
 			cudaError_t err = cudaGetLastError();
 			if (err != cudaSuccess) {
 				printf("FATAL ERROR: %s\n", cudaGetErrorString(err));
@@ -425,6 +496,7 @@ int main(int argc, char *argv[]) {
 			}
 
 			kernel_sort_event_queues<<<n_blocks, threads_per_block>>>();
+			superstep++;
 		}
 
 		cudaEventRecord(stop);
@@ -446,6 +518,10 @@ int main(int argc, char *argv[]) {
 		int   n_measurements = 0;
 		float sum_rates = 0;
 		uint64_t total_execute_cycles = 0;
+
+		struct timespec ts_start_wall;
+		if (trace_fp) clock_gettime(CLOCK_MONOTONIC, &ts_start_wall);
+		uint superstep = 0;
 
 		cudaEventRecord(mstart);
 
@@ -493,6 +569,16 @@ int main(int argc, char *argv[]) {
 				measure_events += h_n_events_cmt;
 			}
 
+			uint prev_processed = 0, prev_rolledback = 0;
+			if (trace_fp) {
+				cudaMemcpyFromSymbol(&prev_processed, g_n_total_processed, sizeof(uint));
+				cudaMemcpyFromSymbol(&prev_rolledback, g_n_total_rolledback, sizeof(uint));
+			}
+
+			uint step_exec_cycles = 0;
+			uint64_t step_inac_1 = 0, step_inac_2 = 0, step_inac_3 = 0;
+			uint64_t step_inac_4 = 0, step_inac_5 = 0, step_inac_6 = 0;
+
 			/* Handle next events */
 			while (1) {
 				h_inac_1 = h_inac_2 = h_inac_3 = 0;
@@ -511,6 +597,7 @@ int main(int argc, char *argv[]) {
 					cudaMemcpyHostToDevice);
 
 				total_execute_cycles++;
+				step_exec_cycles++;
 
 #if (OPTM_SYNC == 1)
 				kernel_handle_next_event<<<
@@ -539,6 +626,12 @@ int main(int argc, char *argv[]) {
 				cudaMemcpy(&h_inac_6, d_inac_6, sizeof(uint),
 					cudaMemcpyDeviceToHost);
 
+				if (trace_fp) {
+					step_inac_1 += h_inac_1; step_inac_2 += h_inac_2;
+					step_inac_3 += h_inac_3; step_inac_4 += h_inac_4;
+					step_inac_5 += h_inac_5; step_inac_6 += h_inac_6;
+				}
+
 #if (ALLOW_ME == 1)
 				uint inac =
 					h_inac_1 + h_inac_2 + h_inac_3 +
@@ -564,6 +657,33 @@ int main(int argc, char *argv[]) {
 			}
 #endif
 
+			if (trace_fp) {
+				uint cur_processed = 0, cur_rolledback = 0;
+				cudaMemcpyFromSymbol(&cur_processed, g_n_total_processed, sizeof(uint));
+				cudaMemcpyFromSymbol(&cur_rolledback, g_n_total_rolledback, sizeof(uint));
+
+				uint step_processed = cur_processed - prev_processed;
+				uint step_rolledback = cur_rolledback - prev_rolledback;
+				uint64_t step_total_inac = step_inac_1 + step_inac_2 + step_inac_3 +
+					step_inac_4 + step_inac_5 + step_inac_6;
+
+				struct timespec ts_now;
+				clock_gettime(CLOCK_MONOTONIC, &ts_now);
+				double wall_ms = (ts_now.tv_sec - ts_start_wall.tv_sec) * 1000.0 +
+					(ts_now.tv_nsec - ts_start_wall.tv_nsec) / 1e6;
+
+				fprintf(trace_fp,
+					"%d,%u,%.4f,%.6f,"
+					"%u,%u,%u,%u,"
+					"%lu,%lu,%lu,%lu,%lu,%lu,%lu\n",
+					r, superstep, wall_ms, gvt,
+					step_exec_cycles, step_processed, step_rolledback, h_n_events_cmt,
+					(unsigned long)step_total_inac,
+					(unsigned long)step_inac_1, (unsigned long)step_inac_2,
+					(unsigned long)step_inac_3, (unsigned long)step_inac_4,
+					(unsigned long)step_inac_5, (unsigned long)step_inac_6);
+			}
+
 			cudaError_t err = cudaGetLastError();
 			if (err != cudaSuccess) {
 				printf("FATAL ERROR: %s\n", cudaGetErrorString(err));
@@ -571,6 +691,7 @@ int main(int argc, char *argv[]) {
 			}
 
 			kernel_sort_event_queues<<<n_blocks, threads_per_block>>>();
+			superstep++;
 		}
 
 		cudaEventRecord(stop);
@@ -639,6 +760,11 @@ int main(int argc, char *argv[]) {
 	if (n_runs > 1) {
 		float ci = get_interval_95(n_runs, results_rate);
 		printf("95%% CI:     +/- %.3f\n", ci);
+	}
+
+	if (trace_fp) {
+		fclose(trace_fp);
+		printf("Trace written to: %s\n", bp.trace_file);
 	}
 
 	return 0;
